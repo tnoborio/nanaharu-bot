@@ -1,5 +1,6 @@
 # Builder stage
-FROM rust:1.81 as builder
+# Use a Rust toolchain new enough for reqwest/axum transitive ICU crates (needs 1.83)
+FROM rust:1.83 as builder
 
 WORKDIR /app
 

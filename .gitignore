@@ -1,0 +1,26 @@
+# --- Rust / Cargo ---
+/target
+**/*.rs.bk
+
+# Build artifacts
+*.log
+
+# --- Environment files ---
+.env
+.env.*
+!.env.example
+
+# --- OS / Editor ---
+# macOS
+.DS_Store
+
+# VS Code
+.vscode/
+.history/
+
+# IntelliJ / CLion / RustRover
+.idea/
+
+# --- Others ---
+# Backup files
+*~

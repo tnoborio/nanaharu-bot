@@ -1,0 +1,11 @@
+services:
+  app:
+    build: .
+    container_name: line-bot
+    environment:
+      - LINE_CHANNEL_SECRET=${LINE_CHANNEL_SECRET}
+      - LINE_CHANNEL_ACCESS_TOKEN=${LINE_CHANNEL_ACCESS_TOKEN}
+      - PORT=8080
+      - RUST_LOG=info
+    ports:
+      - "8080:8080"

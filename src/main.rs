@@ -156,11 +156,12 @@ fn verify_signature(channel_secret: &str, body: &[u8], signature_header: &str) -
 }
 
 async fn handle_event(state: &AppState, event: LineEvent) -> anyhow::Result<()> {
+    println!("handling event: {:?}", event);
     if event.r#type == "message" {
         if let (Some(reply_token), Some(message)) = (event.reply_token, event.message) {
             if message.r#type == "text" {
                 if let Some(text) = message.text {
-                    let reply_text = format!("You said: {}", text);
+                    let reply_text = text;
                     send_reply(
                         &state.client,
                         &state.channel_access_token,

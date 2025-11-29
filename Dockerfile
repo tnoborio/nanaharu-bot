@@ -1,6 +1,7 @@
 # Builder stage
 # Use a Rust toolchain new enough for reqwest/axum transitive ICU crates (needs 1.83)
 FROM rust:1.91-slim-trixie AS builder
+ARG DEBIAN_FRONTEND=noninteractive
 
 WORKDIR /app
 
@@ -9,7 +10,6 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends pkg-config libssl-dev \
  && rm -rf /var/lib/apt/lists/*
 
-# 依存関係をキャッシュさせるために先に Cargo.toml をコピー
 COPY Cargo.toml .
 
 # ビルド用のダミー src を一旦置く
@@ -23,12 +23,13 @@ RUN cargo build --release
 # Runtime stage
 FROM debian:trixie-slim
 
+ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/target/release/line-bot /usr/local/bin/line-bot
 
-ENV RUST_LOG=info
+ENV RUST_LOG=trace
 
 EXPOSE 8080
 
-CMD ["line-bot"]
+ENTRYPOINT ["/usr/local/bin/line-bot"]

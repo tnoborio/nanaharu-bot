@@ -1,0 +1,17 @@
+# Build a linux/amd64 image to avoid architecture mismatch on Cloud Run
+substitutions:
+  _IMAGE: "us-docker.pkg.dev/PROJECT/REPO/line-bot:latest"
+
+steps:
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      - "build"
+      - "--platform=linux/x86_64"
+      - "-t"
+      - "$_IMAGE"
+      - "-f"
+      - "Dockerfile"
+      - "."
+
+images:
+  - "$_IMAGE"

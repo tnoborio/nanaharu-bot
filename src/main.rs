@@ -7,14 +7,14 @@ use axum::{
     Router,
 };
 use serde::Deserialize;
-use std::env;
-use std::net::SocketAddr;
+use anyhow::Context;
+use std::{env, io::Write, net::SocketAddr};
 use tracing::{error, info};
 use tracing_subscriber::{fmt, EnvFilter};
 
+use base64::{engine::general_purpose, Engine as _};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
-use base64::{engine::general_purpose, Engine as _};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -27,20 +27,44 @@ struct AppState {
 
 #[tokio::main]
 async fn main() {
-    // Initialize logging
-    fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .init();
+    println!("line-bot starting up...");
+    if let Err(err) = run().await {
+        error!(error = ?err, "application exited with error");
+        std::process::exit(1);
+    }
+}
+
+async fn run() -> anyhow::Result<()> {
+    let mut stdout = std::io::stdout();
+    writeln!(
+        &mut stdout,
+        "line-bot starting (version {}, arch {}, pid {})",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::ARCH,
+        std::process::id()
+    )?;
+    stdout.flush()?;
+
+    // Initialize logging (default to info if RUST_LOG not set)
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    fmt().with_env_filter(env_filter).init();
 
     let channel_secret = env::var("LINE_CHANNEL_SECRET")
-        .expect("LINE_CHANNEL_SECRET must be set");
+        .context("LINE_CHANNEL_SECRET must be set in the environment")?;
     let channel_access_token = env::var("LINE_CHANNEL_ACCESS_TOKEN")
-        .expect("LINE_CHANNEL_ACCESS_TOKEN must be set");
+        .context("LINE_CHANNEL_ACCESS_TOKEN must be set in the environment")?;
 
     let port: u16 = env::var("PORT")
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(8080);
+    writeln!(
+        &mut stdout,
+        "env OK: PORT={}, RUST_LOG={}",
+        port,
+        env::var("RUST_LOG").unwrap_or_else(|_| "info(default)".into())
+    )?;
+    stdout.flush()?;
 
     let state = AppState {
         client: reqwest::Client::new(),
@@ -50,13 +74,22 @@ async fn main() {
 
     let app = Router::new()
         .route("/webhook", post(handle_webhook))
+        .route("/", axum::routing::get(|| async { "ok" }))
         .with_state(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     info!(?addr, "starting server");
 
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .context("failed to bind TCP listener")?;
+    writeln!(&mut stdout, "listener bound on {}", addr)?;
+    stdout.flush()?;
+    axum::serve(listener, app)
+        .await
+        .context("axum server failed")?;
+
+    Ok(())
 }
 
 async fn handle_webhook(
@@ -128,7 +161,13 @@ async fn handle_event(state: &AppState, event: LineEvent) -> anyhow::Result<()> 
             if message.r#type == "text" {
                 if let Some(text) = message.text {
                     let reply_text = format!("You said: {}", text);
-                    send_reply(&state.client, &state.channel_access_token, &reply_token, &reply_text).await?;
+                    send_reply(
+                        &state.client,
+                        &state.channel_access_token,
+                        &reply_token,
+                        &reply_text,
+                    )
+                    .await?;
                 }
             }
         }

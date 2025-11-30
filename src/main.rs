@@ -222,6 +222,7 @@ struct LineWebhook {
 struct LineEvent {
     #[serde(rename = "type")]
     r#type: String,
+    #[serde(rename = "replyToken")]
     #[serde(default)]
     reply_token: Option<String>,
     #[serde(default)]

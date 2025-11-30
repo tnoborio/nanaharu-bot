@@ -1,20 +1,21 @@
+use anyhow::Context;
 use axum::{
     body::Bytes,
     extract::State,
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
-    routing::post,
+    routing::{get, post},
     Router,
 };
+use base64::{engine::general_purpose, Engine as _};
+use cloud_storage::Client as GcsClient;
+use hmac::{Hmac, Mac};
 use serde::Deserialize;
-use anyhow::Context;
-use std::{env, io::Write, net::SocketAddr};
+use sha2::Sha256;
+use std::{collections::HashMap, env, io::Write, net::SocketAddr};
 use tracing::{error, info};
 use tracing_subscriber::{fmt, EnvFilter};
-
-use base64::{engine::general_purpose, Engine as _};
-use hmac::{Hmac, Mac};
-use sha2::Sha256;
+use uuid::Uuid;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -23,6 +24,9 @@ struct AppState {
     client: reqwest::Client,
     channel_secret: String,
     channel_access_token: String,
+    gcs_bucket: String,
+    admin_user_ids: Vec<String>,
+    presets: HashMap<String, String>,
 }
 
 #[tokio::main]
@@ -53,6 +57,19 @@ async fn run() -> anyhow::Result<()> {
         .context("LINE_CHANNEL_SECRET must be set in the environment")?;
     let channel_access_token = env::var("LINE_CHANNEL_ACCESS_TOKEN")
         .context("LINE_CHANNEL_ACCESS_TOKEN must be set in the environment")?;
+    let gcs_bucket = env::var("GCS_BUCKET").context("GCS_BUCKET must be set in the environment")?;
+
+    let admin_user_ids = env::var("ADMIN_USER_IDS")
+        .unwrap_or_default()
+        .split(',')
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.trim().to_string())
+        .collect::<Vec<_>>();
+    if admin_user_ids.is_empty() {
+        info!("ADMIN_USER_IDS is empty; image uploads will be rejected");
+    }
+
+    let presets = load_presets();
 
     let port: u16 = env::var("PORT")
         .ok()
@@ -70,11 +87,14 @@ async fn run() -> anyhow::Result<()> {
         client: reqwest::Client::new(),
         channel_secret,
         channel_access_token,
+        gcs_bucket,
+        admin_user_ids,
+        presets,
     };
 
     let app = Router::new()
         .route("/webhook", post(handle_webhook))
-        .route("/", axum::routing::get(|| async { "ok" }))
+        .route("/", get(|| async { "ok" }))
         .with_state(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
@@ -158,20 +178,306 @@ fn verify_signature(channel_secret: &str, body: &[u8], signature_header: &str) -
 async fn handle_event(state: &AppState, event: LineEvent) -> anyhow::Result<()> {
     println!("handling event: {:?}", event);
     if event.r#type == "message" {
-        if let (Some(reply_token), Some(message)) = (event.reply_token, event.message) {
-            if message.r#type == "text" {
-                if let Some(text) = message.text {
-                    let reply_text = text;
-                    send_reply(
-                        &state.client,
-                        &state.channel_access_token,
-                        &reply_token,
-                        &reply_text,
-                    )
-                    .await?;
+        if let (Some(reply_token), Some(message)) = (event.reply_token.clone(), event.message.clone()) {
+            match message.r#type.as_str() {
+                "text" => {
+                    if let Some(text) = message.text.clone() {
+                        handle_text_message(state, &reply_token, text).await?;
+                    }
                 }
+                "image" => {
+                    handle_image_message(state, &reply_token, &event, message).await?;
+                }
+                _ => {}
             }
         }
+    } else if event.r#type == "postback" {
+        if let (Some(reply_token), Some(postback)) = (event.reply_token.clone(), event.postback.clone()) {
+            handle_postback(state, &reply_token, postback).await?;
+        }
+    }
+
+    Ok(())
+}
+
+fn load_presets() -> HashMap<String, String> {
+    // 固定メッセージ -> GCS オブジェクトパス
+    let pairs = [
+        ("menu1", "images/menu1.jpg"),
+        ("menu2", "images/menu2.jpg"),
+        ("menu3", "images/menu3.jpg"),
+        ("menu4", "images/menu4.jpg"),
+    ];
+    pairs
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect()
+}
+
+async fn handle_text_message(
+    state: &AppState,
+    reply_token: &str,
+    text: String,
+) -> anyhow::Result<()> {
+    let trimmed = text.trim();
+    if let Some(object) = state.presets.get(trimmed) {
+        let url = public_url(&state.gcs_bucket, object);
+        send_image_reply(
+            &state.client,
+            &state.channel_access_token,
+            reply_token,
+            &url,
+        )
+        .await?;
+    } else {
+        // fallback echo
+        send_text_reply(
+            &state.client,
+            &state.channel_access_token,
+            reply_token,
+            trimmed,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn handle_image_message(
+    state: &AppState,
+    reply_token: &str,
+    event: &LineEvent,
+    message: LineMessage,
+) -> anyhow::Result<()> {
+    println!("handling image message: {:?}", message);
+
+    let user_id = event
+        .source
+        .as_ref()
+        .and_then(|s| s.user_id.as_ref())
+        .map(|s| s.as_str());
+    if !is_admin(user_id, &state.admin_user_ids) {
+        send_text_reply(
+            &state.client,
+            &state.channel_access_token,
+            reply_token,
+            "この操作は管理者のみ可能です。",
+        )
+        .await?;
+        return Ok(());
+    }
+    println!("user is admin: {:?}", user_id);
+
+    // Download image content from LINE
+    let content = fetch_line_content(&state.client, &state.channel_access_token, &message.id).await?;
+
+    // Save to GCS as temporary object
+    let pending_id = Uuid::new_v4().to_string();
+    let tmp_object = format!("uploads/{}.jpg", pending_id);
+    upload_to_gcs(&state.gcs_bucket, &tmp_object, content).await?;
+
+    // Ask which preset to bind
+    send_mapping_prompt(
+        &state.client,
+        &state.channel_access_token,
+        reply_token,
+        &pending_id,
+        &state.presets,
+    )
+    .await?;
+
+    Ok(())
+}
+
+async fn handle_postback(
+    state: &AppState,
+    reply_token: &str,
+    postback: LinePostback,
+) -> anyhow::Result<()> {
+    let data = postback.data.unwrap_or_default();
+    let params = url::form_urlencoded::parse(data.as_bytes())
+        .into_owned()
+        .collect::<HashMap<String, String>>();
+    let pending_id = match params.get("pending") {
+        Some(v) => v,
+        None => return Ok(()),
+    };
+    let target_key = match params.get("target") {
+        Some(v) => v,
+        None => return Ok(()),
+    };
+
+    let tmp_object = format!("uploads/{}.jpg", pending_id);
+    let Some(target_object) = state.presets.get(target_key) else {
+        send_text_reply(
+            &state.client,
+            &state.channel_access_token,
+            reply_token,
+            "指定されたメッセージが見つかりません。",
+        )
+        .await?;
+        return Ok(());
+    };
+
+    // Copy temporary object to target
+    copy_gcs_object(&state.gcs_bucket, &tmp_object, target_object).await?;
+
+    let url = public_url(&state.gcs_bucket, target_object);
+    send_text_reply(
+        &state.client,
+        &state.channel_access_token,
+        reply_token,
+        &format!("画像を更新しました: {}", target_key),
+    )
+    .await?;
+    send_image_reply(
+        &state.client,
+        &state.channel_access_token,
+        reply_token,
+        &url,
+    )
+    .await?;
+
+    Ok(())
+}
+
+fn is_admin(user_id: Option<&str>, admins: &[String]) -> bool {
+    match user_id {
+        Some(uid) => admins.iter().any(|a| a == uid),
+        None => false,
+    }
+}
+
+fn public_url(bucket: &str, object: &str) -> String {
+    format!("https://storage.googleapis.com/{}/{}", bucket, object)
+}
+
+async fn fetch_line_content(
+    client: &reqwest::Client,
+    channel_access_token: &str,
+    message_id: &str,
+) -> anyhow::Result<Vec<u8>> {
+    let url = format!(
+        "https://api-data.line.me/v2/bot/message/{}/content",
+        message_id
+    );
+    let resp = client
+        .get(url)
+        .bearer_auth(channel_access_token)
+        .send()
+        .await?;
+    let status = resp.status();
+    let bytes = resp.bytes().await?;
+    if !status.is_success() {
+        anyhow::bail!("failed to fetch content from LINE: status={}", status);
+    }
+    Ok(bytes.to_vec())
+}
+
+async fn upload_to_gcs(bucket: &str, object: &str, data: Vec<u8>) -> anyhow::Result<()> {
+    let client = GcsClient::default();
+    client
+        .object()
+        .create(bucket, data, object, "image/jpeg")
+        .await?;
+    Ok(())
+}
+
+async fn copy_gcs_object(bucket: &str, source: &str, dest: &str) -> anyhow::Result<()> {
+    let client = GcsClient::default();
+    let object = client.object().read(bucket, source).await?;
+    client.object().copy(&object, bucket, dest).await?;
+    Ok(())
+}
+
+async fn send_mapping_prompt(
+    client: &reqwest::Client,
+    channel_access_token: &str,
+    reply_token: &str,
+    pending_id: &str,
+    presets: &HashMap<String, String>,
+) -> anyhow::Result<()> {
+    let actions: Vec<serde_json::Value> = presets
+        .keys()
+        .map(|k| {
+            serde_json::json!({
+                "type": "postback",
+                "label": k,
+                "data": format!("pending={}&target={}", pending_id, k),
+            })
+        })
+        .collect();
+
+    let body = serde_json::json!({
+        "replyToken": reply_token,
+        "messages": [
+            {
+                "type": "template",
+                "altText": "どのメッセージに紐づけますか？",
+                "template": {
+                    "type": "buttons",
+                    "text": "どのメッセージに紐づけますか？",
+                    "actions": actions,
+                }
+            }
+        ]
+    });
+
+    let resp = client
+        .post("https://api.line.me/v2/bot/message/reply")
+        .bearer_auth(channel_access_token)
+        .json(&body)
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        error!(?status, body = %text, "LINE mapping prompt failed");
+    }
+
+    Ok(())
+}
+
+async fn send_text_reply(
+    client: &reqwest::Client,
+    channel_access_token: &str,
+    reply_token: &str,
+    text: &str,
+) -> anyhow::Result<()> {
+    send_reply(client, channel_access_token, reply_token, text).await
+}
+
+async fn send_image_reply(
+    client: &reqwest::Client,
+    channel_access_token: &str,
+    reply_token: &str,
+    image_url: &str,
+) -> anyhow::Result<()> {
+    const LINE_REPLY_URL: &str = "https://api.line.me/v2/bot/message/reply";
+    let body = serde_json::json!({
+        "replyToken": reply_token,
+        "messages": [
+            {
+                "type": "image",
+                "originalContentUrl": image_url,
+                "previewImageUrl": image_url,
+            }
+        ]
+    });
+
+    let resp = client
+        .post(LINE_REPLY_URL)
+        .bearer_auth(channel_access_token)
+        .json(&body)
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        error!(?status, body = %text, "LINE image reply failed");
+    } else {
+        info!("sent image reply to LINE");
     }
 
     Ok(())
@@ -218,7 +524,7 @@ struct LineWebhook {
     events: Vec<LineEvent>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct LineEvent {
     #[serde(rename = "type")]
     r#type: String,
@@ -231,25 +537,35 @@ struct LineEvent {
     timestamp: Option<i64>,
     #[serde(default)]
     message: Option<LineMessage>,
+    #[serde(default)]
+    postback: Option<LinePostback>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct LineSource {
     #[serde(rename = "type")]
     r#type: String,
+    #[serde(rename = "userId")]
     #[serde(default)]
     user_id: Option<String>,
+    #[serde(rename = "roomId")]
     #[serde(default)]
     room_id: Option<String>,
+    #[serde(rename = "groupId")]
     #[serde(default)]
     group_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct LineMessage {
     id: String,
     #[serde(rename = "type")]
     r#type: String,
     #[serde(default)]
     text: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct LinePostback {
+    data: Option<String>,
 }

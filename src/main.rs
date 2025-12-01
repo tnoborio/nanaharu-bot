@@ -194,12 +194,11 @@ async fn handle_event(state: &AppState, event: LineEvent) -> anyhow::Result<()> 
                 _ => {}
             }
         }
-    } else if event.r#type == "postback" {
-        if let (Some(reply_token), Some(postback)) =
+    } else if event.r#type == "postback"
+        && let (Some(reply_token), Some(postback)) =
             (event.reply_token.clone(), event.postback.clone())
-        {
-            handle_postback(state, &reply_token, postback).await?;
-        }
+    {
+        handle_postback(state, &reply_token, postback).await?;
     }
 
     Ok(())
@@ -208,14 +207,14 @@ async fn handle_event(state: &AppState, event: LineEvent) -> anyhow::Result<()> 
 fn load_presets() -> HashMap<String, (String, String)> {
     // 固定メッセージ -> GCS オブジェクトパス
     let pairs = [
-        ("食べ物", "food1", "images/food1.jpg"),
-        ("ナイトランチ", "food2", "images/food2.jpg"),
-        ("飲み物1", "drink1", "images/drink1.jpg"),
-        ("飲み物2", "drink2", "images/drink2.jpg"),
+        ("食べ物", ("food1", "images/food1.jpg")),
+        ("ナイトランチ", ("food2", "images/food2.jpg")),
+        ("飲み物1", ("drink1", "images/drink1.jpg")),
+        ("飲み物2", ("drink2", "images/drink2.jpg")),
     ];
     pairs
         .into_iter()
-        .map(|(name, key, image_path)| {
+        .map(|(name, (key, image_path))| {
             (name.to_string(), (key.to_string(), image_path.to_string()))
         })
         .collect()

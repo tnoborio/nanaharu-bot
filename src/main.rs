@@ -207,10 +207,10 @@ async fn handle_event(state: &AppState, event: LineEvent) -> anyhow::Result<()> 
 fn load_presets() -> HashMap<String, (String, String)> {
     // 固定メッセージ -> GCS オブジェクトパス
     let pairs = [
-        ("食べ物", ("food1", "images/food1.jpg")),
-        ("ナイトランチ", ("food2", "images/food2.jpg")),
-        ("飲み物1", ("drink1", "images/drink1.jpg")),
-        ("飲み物2", ("drink2", "images/drink2.jpg")),
+        ("食べ物メニュー", ("food1", "images/food1.jpg")),
+        ("ナイトランチメニュー", ("food2", "images/food2.jpg")),
+        ("飲み物1メニュー", ("drink1", "images/drink1.jpg")),
+        ("飲み物2メニュー", ("drink2", "images/drink2.jpg")),
     ];
     pairs
         .into_iter()
@@ -225,9 +225,11 @@ async fn handle_text_message(
     reply_token: &str,
     text: String,
 ) -> anyhow::Result<()> {
-    let trimmed = text.trim();
-    if let Some((_key, object)) = state.presets.get(trimmed) {
-        let url = public_url(&state.gcs_bucket, object);
+    let trimmed = text.trim().to_owned();
+    info!("handling text message: {}", trimmed);
+    if let Some((_key, object)) = state.presets.get(trimmed.as_str()) {
+        let url = signed_url(&state.gcs_bucket, object, 3600).await?;
+        info!("found preset image for '{}': {}", trimmed, url);
         send_image_reply(
             &state.client,
             &state.channel_access_token,
@@ -241,7 +243,7 @@ async fn handle_text_message(
             &state.client,
             &state.channel_access_token,
             reply_token,
-            trimmed,
+            "メッセージありがとうございます！\n\n申し訳ありませんが、このアカウントでは個別のお問い合わせを受け付けておりません。次の配信までお待ちください。",
         )
         .await?;
     }
@@ -331,7 +333,7 @@ async fn handle_postback(
     // Copy temporary object to target
     copy_gcs_object(&state.gcs_bucket, &tmp_object, target_object).await?;
 
-    let url = public_url(&state.gcs_bucket, target_object);
+    let url = signed_url(&state.gcs_bucket, target_object, 3600).await?;
     send_text_reply(
         &state.client,
         &state.channel_access_token,
@@ -357,8 +359,11 @@ fn is_admin(user_id: Option<&str>, admins: &[String]) -> bool {
     }
 }
 
-fn public_url(bucket: &str, object: &str) -> String {
-    format!("https://storage.googleapis.com/{}/{}", bucket, object)
+async fn signed_url(bucket: &str, object: &str, expires_in_secs: u32) -> anyhow::Result<String> {
+    let client = GcsClient::default();
+    let obj = client.object().read(bucket, object).await?;
+    let url = obj.download_url(expires_in_secs)?;
+    Ok(url)
 }
 
 async fn fetch_line_content(

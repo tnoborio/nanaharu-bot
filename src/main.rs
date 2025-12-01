@@ -26,7 +26,7 @@ struct AppState {
     channel_access_token: String,
     gcs_bucket: String,
     admin_user_ids: Vec<String>,
-    presets: HashMap<String, String>,
+    presets: HashMap<String, (String, String)>,
 }
 
 #[tokio::main]
@@ -149,6 +149,7 @@ async fn handle_webhook(
     info!("received {} event(s)", payload.events.len());
 
     for event in payload.events {
+        info!("processing event: {:?}", event);
         if let Err(e) = handle_event(&state, event).await {
             error!(error = ?e, "error handling event");
         }
@@ -200,17 +201,17 @@ async fn handle_event(state: &AppState, event: LineEvent) -> anyhow::Result<()> 
     Ok(())
 }
 
-fn load_presets() -> HashMap<String, String> {
+fn load_presets() -> HashMap<String, (String, String)> {
     // 固定メッセージ -> GCS オブジェクトパス
     let pairs = [
-        ("menu1", "images/menu1.jpg"),
-        ("menu2", "images/menu2.jpg"),
-        ("menu3", "images/menu3.jpg"),
-        ("menu4", "images/menu4.jpg"),
+        ("食べ物", "food1", "images/food1.jpg"),
+        ("ナイトランチ", "food2", "images/food2.jpg"),
+        ("飲み物1", "drink1", "images/drink1.jpg"),
+        ("飲み物2", "drink2", "images/drink2.jpg"),
     ];
     pairs
         .into_iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .map(|(name, key, image_path)| (name.to_string(), (key.to_string(), image_path.to_string())))
         .collect()
 }
 
@@ -220,7 +221,7 @@ async fn handle_text_message(
     text: String,
 ) -> anyhow::Result<()> {
     let trimmed = text.trim();
-    if let Some(object) = state.presets.get(trimmed) {
+    if let Some((_key, object)) = state.presets.get(trimmed) {
         let url = public_url(&state.gcs_bucket, object);
         send_image_reply(
             &state.client,
@@ -273,6 +274,9 @@ async fn handle_image_message(
     // Save to GCS as temporary object
     let pending_id = Uuid::new_v4().to_string();
     let tmp_object = format!("uploads/{}.jpg", pending_id);
+
+    println!("uploading temporary object to GCS: {}", tmp_object);
+
     upload_to_gcs(&state.gcs_bucket, &tmp_object, content).await?;
 
     // Ask which preset to bind
@@ -307,7 +311,7 @@ async fn handle_postback(
     };
 
     let tmp_object = format!("uploads/{}.jpg", pending_id);
-    let Some(target_object) = state.presets.get(target_key) else {
+    let Some((_, target_object)) = state.presets.get(target_key) else {
         send_text_reply(
             &state.client,
             &state.channel_access_token,
@@ -394,7 +398,7 @@ async fn send_mapping_prompt(
     channel_access_token: &str,
     reply_token: &str,
     pending_id: &str,
-    presets: &HashMap<String, String>,
+    presets: &HashMap<String, (String, String)>,
 ) -> anyhow::Result<()> {
     let actions: Vec<serde_json::Value> = presets
         .keys()
@@ -534,8 +538,6 @@ struct LineEvent {
     #[serde(default)]
     source: Option<LineSource>,
     #[serde(default)]
-    timestamp: Option<i64>,
-    #[serde(default)]
     message: Option<LineMessage>,
     #[serde(default)]
     postback: Option<LinePostback>,
@@ -543,17 +545,12 @@ struct LineEvent {
 
 #[derive(Debug, Deserialize, Clone)]
 struct LineSource {
+    #[allow(dead_code)]
     #[serde(rename = "type")]
     r#type: String,
     #[serde(rename = "userId")]
     #[serde(default)]
     user_id: Option<String>,
-    #[serde(rename = "roomId")]
-    #[serde(default)]
-    room_id: Option<String>,
-    #[serde(rename = "groupId")]
-    #[serde(default)]
-    group_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

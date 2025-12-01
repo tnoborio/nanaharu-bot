@@ -1,20 +1,20 @@
 use anyhow::Context;
 use axum::{
+    Router,
     body::Bytes,
     extract::State,
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{get, post},
-    Router,
 };
-use base64::{engine::general_purpose, Engine as _};
+use base64::{Engine as _, engine::general_purpose};
 use cloud_storage::Client as GcsClient;
 use hmac::{Hmac, Mac};
 use serde::Deserialize;
 use sha2::Sha256;
 use std::{collections::HashMap, env, io::Write, net::SocketAddr};
 use tracing::{error, info};
-use tracing_subscriber::{fmt, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt};
 use uuid::Uuid;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -179,7 +179,9 @@ fn verify_signature(channel_secret: &str, body: &[u8], signature_header: &str) -
 async fn handle_event(state: &AppState, event: LineEvent) -> anyhow::Result<()> {
     println!("handling event: {:?}", event);
     if event.r#type == "message" {
-        if let (Some(reply_token), Some(message)) = (event.reply_token.clone(), event.message.clone()) {
+        if let (Some(reply_token), Some(message)) =
+            (event.reply_token.clone(), event.message.clone())
+        {
             match message.r#type.as_str() {
                 "text" => {
                     if let Some(text) = message.text.clone() {
@@ -192,10 +194,11 @@ async fn handle_event(state: &AppState, event: LineEvent) -> anyhow::Result<()> 
                 _ => {}
             }
         }
-    } else if event.r#type == "postback" {
-        if let (Some(reply_token), Some(postback)) = (event.reply_token.clone(), event.postback.clone()) {
-            handle_postback(state, &reply_token, postback).await?;
-        }
+    } else if event.r#type == "postback"
+        && let (Some(reply_token), Some(postback)) =
+            (event.reply_token.clone(), event.postback.clone())
+    {
+        handle_postback(state, &reply_token, postback).await?;
     }
 
     Ok(())
@@ -204,14 +207,16 @@ async fn handle_event(state: &AppState, event: LineEvent) -> anyhow::Result<()> 
 fn load_presets() -> HashMap<String, (String, String)> {
     // 固定メッセージ -> GCS オブジェクトパス
     let pairs = [
-        ("食べ物", "food1", "images/food1.jpg"),
-        ("ナイトランチ", "food2", "images/food2.jpg"),
-        ("飲み物1", "drink1", "images/drink1.jpg"),
-        ("飲み物2", "drink2", "images/drink2.jpg"),
+        ("食べ物メニュー", ("food1", "images/food1.jpg")),
+        ("ナイトランチメニュー", ("food2", "images/food2.jpg")),
+        ("飲み物1メニュー", ("drink1", "images/drink1.jpg")),
+        ("飲み物2メニュー", ("drink2", "images/drink2.jpg")),
     ];
     pairs
         .into_iter()
-        .map(|(name, key, image_path)| (name.to_string(), (key.to_string(), image_path.to_string())))
+        .map(|(name, (key, image_path))| {
+            (name.to_string(), (key.to_string(), image_path.to_string()))
+        })
         .collect()
 }
 
@@ -220,9 +225,11 @@ async fn handle_text_message(
     reply_token: &str,
     text: String,
 ) -> anyhow::Result<()> {
-    let trimmed = text.trim();
-    if let Some((_key, object)) = state.presets.get(trimmed) {
-        let url = public_url(&state.gcs_bucket, object);
+    let trimmed = text.trim().to_owned();
+    info!("handling text message: {}", trimmed);
+    if let Some((_key, object)) = state.presets.get(trimmed.as_str()) {
+        let url = signed_url(&state.gcs_bucket, object, 3600).await?;
+        info!("found preset image for '{}': {}", trimmed, url);
         send_image_reply(
             &state.client,
             &state.channel_access_token,
@@ -236,7 +243,7 @@ async fn handle_text_message(
             &state.client,
             &state.channel_access_token,
             reply_token,
-            trimmed,
+            "メッセージありがとうございます！\n\n申し訳ありませんが、このアカウントでは個別のお問い合わせを受け付けておりません。次の配信までお待ちください。",
         )
         .await?;
     }
@@ -269,7 +276,8 @@ async fn handle_image_message(
     println!("user is admin: {:?}", user_id);
 
     // Download image content from LINE
-    let content = fetch_line_content(&state.client, &state.channel_access_token, &message.id).await?;
+    let content =
+        fetch_line_content(&state.client, &state.channel_access_token, &message.id).await?;
 
     // Save to GCS as temporary object
     let pending_id = Uuid::new_v4().to_string();
@@ -325,7 +333,7 @@ async fn handle_postback(
     // Copy temporary object to target
     copy_gcs_object(&state.gcs_bucket, &tmp_object, target_object).await?;
 
-    let url = public_url(&state.gcs_bucket, target_object);
+    let url = signed_url(&state.gcs_bucket, target_object, 3600).await?;
     send_text_reply(
         &state.client,
         &state.channel_access_token,
@@ -351,8 +359,11 @@ fn is_admin(user_id: Option<&str>, admins: &[String]) -> bool {
     }
 }
 
-fn public_url(bucket: &str, object: &str) -> String {
-    format!("https://storage.googleapis.com/{}/{}", bucket, object)
+async fn signed_url(bucket: &str, object: &str, expires_in_secs: u32) -> anyhow::Result<String> {
+    let client = GcsClient::default();
+    let obj = client.object().read(bucket, object).await?;
+    let url = obj.download_url(expires_in_secs)?;
+    Ok(url)
 }
 
 async fn fetch_line_content(

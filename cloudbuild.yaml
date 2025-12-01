@@ -3,14 +3,16 @@ substitutions:
   _IMAGE: "us-docker.pkg.dev/PROJECT/REPO/line-bot:latest"
 
 steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    entrypoint: 'bash'
+    args: ['-c', 'docker pull $_IMAGE || exit 0']
   - name: "gcr.io/cloud-builders/docker"
     args:
       - "build"
-      - "--platform=linux/x86_64"
       - "-t"
       - "$_IMAGE"
-      - "-f"
-      - "Dockerfile"
+      - "--cache-from"
+      - "$_IMAGE"
       - "."
 
 images:

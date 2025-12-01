@@ -1,6 +1,13 @@
 FROM rust:1.91-slim-trixie AS builder
 WORKDIR /app
-COPY . .
+
+COPY Cargo.toml Cargo.lock ./
+RUN mkdir src && echo "fn main() { println!(\"placeholder\"); }" > src/main.rs && cargo fetch
+RUN cargo build --release
+
+RUN rm -rf src
+COPY src ./src
+RUN touch src/main.rs
 RUN cargo build --release
 
 # Runtime stage: Distroless for security and small image

@@ -1,0 +1,10 @@
+target
+.git
+.gitignore
+.env
+.env.*
+Dockerfile
+docker-compose.yml
+cloudbuild.yaml
+policy.json
+README.md

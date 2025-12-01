@@ -1,20 +1,20 @@
 use anyhow::Context;
 use axum::{
+    Router,
     body::Bytes,
     extract::State,
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{get, post},
-    Router,
 };
-use base64::{engine::general_purpose, Engine as _};
+use base64::{Engine as _, engine::general_purpose};
 use cloud_storage::Client as GcsClient;
 use hmac::{Hmac, Mac};
 use serde::Deserialize;
 use sha2::Sha256;
 use std::{collections::HashMap, env, io::Write, net::SocketAddr};
 use tracing::{error, info};
-use tracing_subscriber::{fmt, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt};
 use uuid::Uuid;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -179,7 +179,9 @@ fn verify_signature(channel_secret: &str, body: &[u8], signature_header: &str) -
 async fn handle_event(state: &AppState, event: LineEvent) -> anyhow::Result<()> {
     println!("handling event: {:?}", event);
     if event.r#type == "message" {
-        if let (Some(reply_token), Some(message)) = (event.reply_token.clone(), event.message.clone()) {
+        if let (Some(reply_token), Some(message)) =
+            (event.reply_token.clone(), event.message.clone())
+        {
             match message.r#type.as_str() {
                 "text" => {
                     if let Some(text) = message.text.clone() {
@@ -193,7 +195,9 @@ async fn handle_event(state: &AppState, event: LineEvent) -> anyhow::Result<()> 
             }
         }
     } else if event.r#type == "postback" {
-        if let (Some(reply_token), Some(postback)) = (event.reply_token.clone(), event.postback.clone()) {
+        if let (Some(reply_token), Some(postback)) =
+            (event.reply_token.clone(), event.postback.clone())
+        {
             handle_postback(state, &reply_token, postback).await?;
         }
     }
@@ -211,7 +215,9 @@ fn load_presets() -> HashMap<String, (String, String)> {
     ];
     pairs
         .into_iter()
-        .map(|(name, key, image_path)| (name.to_string(), (key.to_string(), image_path.to_string())))
+        .map(|(name, key, image_path)| {
+            (name.to_string(), (key.to_string(), image_path.to_string()))
+        })
         .collect()
 }
 
@@ -269,7 +275,8 @@ async fn handle_image_message(
     println!("user is admin: {:?}", user_id);
 
     // Download image content from LINE
-    let content = fetch_line_content(&state.client, &state.channel_access_token, &message.id).await?;
+    let content =
+        fetch_line_content(&state.client, &state.channel_access_token, &message.id).await?;
 
     // Save to GCS as temporary object
     let pending_id = Uuid::new_v4().to_string();
